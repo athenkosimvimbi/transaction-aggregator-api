@@ -1,0 +1,34 @@
+# Runs MySQL + the API together:  docker compose up --build
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: aggregator
+      MYSQL_USER: aggregator
+      MYSQL_PASSWORD: aggregator
+      MYSQL_ROOT_PASSWORD: rootpass
+    ports:
+      - "3307:3306"          # 3307 on the host so it doesn't clash with a local MySQL
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  app:
+    build: .
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: on-failure      # MySQL can still be finishing init when the first health check passes
+    environment:
+      DB_URL: "jdbc:mysql://mysql:3306/aggregator?useSSL=false&allowPublicKeyRetrieval=true"
+      DB_USER: aggregator
+      DB_PASSWORD: aggregator
+    ports:
+      - "8080:8080"
+
+volumes:
+  mysql-data:

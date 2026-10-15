@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transaction Aggregator</title>
+<!-- Small dashboard for the Transaction Aggregation API. Author: Athenkosi Mvimbi -->
+<style>
+  :root {
+    --bg:#f5f6f8; --card:#fff; --text:#1d2330; --muted:#6b7385; --line:#e3e6ec;
+    --accent:#0f766e; --in:#15803d; --out:#b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151c; --card:#1a1f2a; --text:#e8ebf2; --muted:#98a1b5; --line:#2a3140; --accent:#2dd4bf; --in:#4ade80; --out:#f87171; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; padding:14px 20px; background:var(--card); border-bottom:1px solid var(--line); }
+  h1 { font-size:18px; margin:0; }
+  main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  select, input, button { font:inherit; padding:6px 10px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--text); }
+  button { cursor:pointer; background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.ghost { background:transparent; color:var(--text); border-color:var(--line); }
+  button:disabled { opacity:.5; cursor:default; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .card h2 { margin:0 0 10px; font-size:14px; color:var(--muted); font-weight:600; }
+  .kpi .v { font-size:22px; font-weight:700; }
+  .in { color:var(--in); } .out { color:var(--out); }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:16px; }
+  .bar-row { display:grid; grid-template-columns:130px 1fr 90px; gap:8px; align-items:center; margin:6px 0; }
+  .bar { height:10px; background:var(--line); border-radius:6px; overflow:hidden; }
+  .bar > span { display:block; height:100%; background:var(--accent); }
+  .month-row { display:grid; grid-template-columns:64px 1fr; gap:8px; align-items:center; margin:8px 0; }
+  .month-row .bar { margin:2px 0; } .bar.i > span { background:var(--in); } .bar.o > span { background:var(--out); }
+  .small { color:var(--muted); font-size:12px; text-align:right; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  td.amt { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .scroll { overflow-x:auto; }
+  .pager { display:flex; gap:10px; align-items:center; justify-content:flex-end; margin-top:10px; }
+  #status { color:var(--muted); font-size:12px; }
+  #error { color:var(--out); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Transaction Aggregator <span style="color:var(--muted);font-weight:400">· South Africa (ZAR)</span></h1>
+  <div class="controls">
+    <label>Customer <select id="customer"></select></label>
+    <label>From <input type="date" id="from"></label>
+    <label>To <input type="date" id="to"></label>
+    <button id="apply">Apply</button>
+    <button id="sync" class="ghost" title="Pull the latest transactions from all mock sources">Sync sources</button>
+  </div>
+</header>
+
+<main>
+  <div id="status"></div><div id="error"></div>
+
+  <section class="cards" id="kpis"></section>
+
+  <section class="grid2">
+    <div class="card"><h2>Spending by category</h2><div id="categories"></div></div>
+    <div class="card"><h2>Monthly cashflow</h2><div id="months"></div></div>
+    <div class="card"><h2>Top merchants</h2><div id="merchants"></div></div>
+    <div class="card"><h2>By source</h2><div id="sources"></div></div>
+  </section>
+
+  <section class="card">
+    <h2>Transactions</h2>
+    <div class="controls" style="margin-bottom:10px">
+      <input id="q" placeholder="Search merchant / description">
+      <select id="fcat"><option value="">All categories</option></select>
+      <select id="ftype"><option value="">Money in &amp; out</option><option value="CREDIT">Money in</option><option value="DEBIT">Money out</option></select>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Date</th><th>Merchant</th><th>Description</th><th>Source</th><th>Category</th><th style="text-align:right">Amount</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <span id="pageinfo"></span>
+      <button class="ghost" id="prev">Previous</button>
+      <button class="ghost" id="next">Next</button>
+    </div>
+  </section>
+</main>
+
+<script>
+  const zar = new Intl.NumberFormat('en-ZA', { style: 'currency', currency: 'ZAR' });
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  const state = { page: 0, totalPages: 0, categories: [] };
+
+  async function api(path, options) {
+    const res = await fetch('/api/v1' + path, options);
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { msg = (await res.json()).detail || msg; } catch (e) { /* ignore */ }
+      throw new Error(msg);
+    }
+    return res.json();
+  }
+
+  function range() {
+    const p = new URLSearchParams();
+    if ($('from').value) p.set('from', $('from').value);
+    if ($('to').value) p.set('to', $('to').value);
+    return p;
+  }
+
+  function bars(rows, valueKey) {
+    const max = Math.max(...rows.map((r) => Number(r[valueKey])), 1);
+    return rows.map((r) => `
+      <div class="bar-row">
+        <span title="${esc(r.label)}">${esc(r.label)}</span>
+        <div class="bar"><span style="width:${(Number(r[valueKey]) / max) * 100}%"></span></div>
+        <span class="small">${zar.format(r[valueKey])}</span>
+      </div>`).join('') || '<span class="small">No data</span>';
+  }
+
+  async function load() {
+    const id = $('customer').value;
+    if (!id) return;
+    $('error').textContent = '';
+    try {
+      const r = range();
+      const [summary, cats, months, merchants, sources] = await Promise.all([
+        api(`/customers/${id}/summary?${r}`),
+        api(`/customers/${id}/aggregations/by-category?${r}`),
+        api(`/customers/${id}/aggregations/by-month?${r}`),
+        api(`/customers/${id}/aggregations/top-merchants?${r}&limit=8`),
+        api(`/customers/${id}/aggregations/by-source?${r}`),
+      ]);
+
+      $('kpis').innerHTML = `
+        <div class="card kpi"><h2>Money in</h2><div class="v in">${zar.format(summary.totalIncome)}</div></div>
+        <div class="card kpi"><h2>Money out</h2><div class="v out">${zar.format(summary.totalExpenses)}</div></div>
+        <div class="card kpi"><h2>Net cashflow</h2><div class="v ${Number(summary.netCashflow) >= 0 ? 'in' : 'out'}">${zar.format(summary.netCashflow)}</div></div>
+        <div class="card kpi"><h2>Savings rate</h2><div class="v">${summary.savingsRatePercent == null ? '–' : summary.savingsRatePercent + '%'}</div></div>
+        <div class="card kpi"><h2>Transactions</h2><div class="v">${summary.transactionCount}</div></div>`;
+
+      $('categories').innerHTML = bars(cats.rows.filter((x) => Number(x.totalOut) > 0), 'totalOut');
+      $('merchants').innerHTML = bars(merchants.rows, 'totalOut');
+      $('sources').innerHTML = bars(sources.rows, 'totalOut');
+
+      const maxMonth = Math.max(...months.rows.map((m) => Math.max(Number(m.totalIn), Number(m.totalOut))), 1);
+      $('months').innerHTML = months.rows.map((m) => `
+        <div class="month-row">
+          <span>${esc(m.label)}</span>
+          <div>
+            <div class="bar i"><span style="width:${(Number(m.totalIn) / maxMonth) * 100}%"></span></div>
+            <div class="bar o"><span style="width:${(Number(m.totalOut) / maxMonth) * 100}%"></span></div>
+            <div class="small">in ${zar.format(m.totalIn)} · out ${zar.format(m.totalOut)}</div>
+          </div>
+        </div>`).join('') || '<span class="small">No data</span>';
+
+      await loadTransactions();
+    } catch (e) {
+      $('error').textContent = 'Could not load data: ' + e.message;
+    }
+  }
+
+  async function loadTransactions() {
+    const id = $('customer').value;
+    const p = range();
+    p.set('page', state.page);
+    p.set('size', 15);
+    if ($('q').value.trim()) p.set('q', $('q').value.trim());
+    if ($('fcat').value) p.set('category', $('fcat').value);
+    if ($('ftype').value) p.set('type', $('ftype').value);
+
+    const page = await api(`/customers/${id}/transactions?${p}`);
+    state.totalPages = page.totalPages;
+    const options = (selected) => state.categories
+      .map((c) => `<option value="${c.code}" ${c.code === selected ? 'selected' : ''}>${esc(c.label)}</option>`).join('');
+
+    $('rows').innerHTML = page.content.map((t) => `
+      <tr>
+        <td>${esc(t.bookedOn)}</td>
+        <td>${esc(t.merchant)}</td>
+        <td>${esc(t.description)}</td>
+        <td>${esc(t.source.replace('MOCK_', '').toLowerCase())}</td>
+        <td><select data-id="${t.id}" class="recat">${options(t.category)}</select>${t.categorisedBy === 'MANUAL' ? ' ✎' : ''}</td>
+        <td class="amt ${t.type === 'CREDIT' ? 'in' : 'out'}">${zar.format(t.amount)}</td>
+      </tr>`).join('') || '<tr><td colspan="6" class="small" style="text-align:center">No transactions</td></tr>';
+
+    $('pageinfo').textContent = `Page ${page.page + 1} of ${Math.max(page.totalPages, 1)} · ${page.totalElements} transactions`;
+    $('prev').disabled = state.page <= 0;
+    $('next').disabled = state.page + 1 >= page.totalPages;
+  }
+
+  async function init() {
+    try {
+      const [customers, categories] = await Promise.all([api('/customers'), api('/categories')]);
+      state.categories = categories;
+      $('customer').innerHTML = customers.map((c) => `<option value="${c.id}">${esc(c.fullName)} (${esc(c.reference)})</option>`).join('');
+      $('fcat').innerHTML += categories.map((c) => `<option value="${c.code}">${esc(c.label)}</option>`).join('');
+      await load();
+    } catch (e) {
+      $('error').textContent = 'Could not reach the API: ' + e.message;
+    }
+  }
+
+  $('apply').onclick = () => { state.page = 0; load(); };
+  $('customer').onchange = () => { state.page = 0; load(); };
+  ['fcat', 'ftype'].forEach((id) => { $(id).onchange = () => { state.page = 0; loadTransactions(); }; });
+  $('q').oninput = (() => { let t; return () => { clearTimeout(t); t = setTimeout(() => { state.page = 0; loadTransactions(); }, 300); }; })();
+  $('prev').onclick = () => { state.page--; loadTransactions(); };
+  $('next').onclick = () => { state.page++; loadTransactions(); };
+
+  $('sync').onclick = async () => {
+    $('sync').disabled = true; $('status').textContent = 'Syncing…';
+    try {
+      const res = await api(`/customers/${$('customer').value}/sync?months=6`, { method: 'POST' });
+      const added = res.reduce((n, r) => n + r.inserted, 0);
+      const failed = res.filter((r) => r.status !== 'OK').length;
+      $('status').textContent = `Sync done: ${added} new transactions` + (failed ? `, ${failed} source(s) failed` : '');
+      await load();
+    } catch (e) {
+      $('error').textContent = 'Sync failed: ' + e.message;
+    } finally { $('sync').disabled = false; }
+  };
+
+  // changing the category dropdown on a row saves it straight away
+  $('rows').addEventListener('change', async (ev) => {
+    if (!ev.target.classList.contains('recat')) return;
+    try {
+      await api(`/transactions/${ev.target.dataset.id}/category`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: ev.target.value }),
+      });
+      await load();
+    } catch (e) { $('error').textContent = 'Could not update category: ' + e.message; }
+  });
+
+  init();
+</script>
+</body>
+</html>
